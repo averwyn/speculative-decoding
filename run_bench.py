@@ -1,7 +1,8 @@
 import argparse
 import os
 import statistics as stats
-from typing import Dict, List, Sequence, Tuple
+import time
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -16,8 +17,10 @@ from common import (
     build_sampling_config,
     models_share_tokenizer_family,
     parse_int_list,
+    to_cache,
     write_csv,
 )
+from spec_decode import timed_model_call
 from spec_decode import speculative_generate
 
 
@@ -110,6 +113,49 @@ def make_sampling_args(base_args, strategy: str):
     return namespace
 
 
+def timed_prefill_and_next_logits(model_bundle: ModelBundle, prompt: str):
+    prompt_ids = model_bundle.tokenizer(prompt, return_tensors="pt").input_ids.to(model_bundle.device)
+    outputs, _ = timed_model_call(
+        model_bundle.model,
+        device=model_bundle.device,
+        input_ids=prompt_ids,
+        use_cache=True,
+    )
+    return prompt_ids, to_cache(outputs.past_key_values), outputs.logits[:, -1, :]
+
+
+def measure_decode_step_latency(
+    model_bundle: ModelBundle,
+    prompt: str,
+    steps: int,
+) -> Optional[float]:
+    if steps <= 0:
+        return None
+
+    prompt_ids, past, next_logits = timed_prefill_and_next_logits(model_bundle, prompt)
+    step_times: List[float] = []
+    token = next_logits.argmax(dim=-1, keepdim=True).to(device=model_bundle.device, dtype=prompt_ids.dtype)
+
+    for _ in range(steps):
+        outputs, elapsed = timed_model_call(
+            model_bundle.model,
+            device=model_bundle.device,
+            input_ids=token,
+            past_key_values=past,
+            use_cache=True,
+        )
+        step_times.append(elapsed)
+        past = to_cache(outputs.past_key_values)
+        token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True).to(
+            device=model_bundle.device,
+            dtype=prompt_ids.dtype,
+        )
+
+    if not step_times:
+        return None
+    return float(stats.mean(step_times))
+
+
 def baseline_row(prompt_id: str, prompt: str, strategy: str, report: Dict[str, object], args) -> Dict[str, object]:
     total_time = report["total_generation_time"]
     return {
@@ -139,6 +185,9 @@ def baseline_row(prompt_id: str, prompt: str, strategy: str, report: Dict[str, o
         "draft_time_ratio": 0.0,
         "verify_time_ratio": 1.0 if total_time > 0 else 0.0,
         "rebuild_time_ratio": 0.0,
+        "target_decode_step_time": "",
+        "draft_decode_step_time": "",
+        "draft_target_latency_ratio": report.get("draft_target_latency_ratio", ""),
     }
 
 
@@ -181,6 +230,9 @@ def speculative_row(
         "draft_time_ratio": draft_time / total_time if total_time > 0 else 0.0,
         "verify_time_ratio": verify_time / total_time if total_time > 0 else 0.0,
         "rebuild_time_ratio": rebuild_time / total_time if total_time > 0 else 0.0,
+        "target_decode_step_time": report.get("target_decode_step_time", ""),
+        "draft_decode_step_time": report.get("draft_decode_step_time", ""),
+        "draft_target_latency_ratio": report.get("draft_target_latency_ratio", ""),
     }
 
 
@@ -210,6 +262,24 @@ def main():
     )
     raw_rows: List[Dict[str, object]] = []
     for prompt_index, (prompt_id, prompt) in enumerate(prompts):
+        target_decode_step_time = measure_decode_step_latency(
+            model_bundle=target_bundle,
+            prompt=prompt,
+            steps=args.max_new_tokens,
+        )
+        draft_decode_step_time = measure_decode_step_latency(
+            model_bundle=draft_bundle,
+            prompt=prompt,
+            steps=args.max_new_tokens,
+        )
+        latency_ratio = ""
+        if (
+            target_decode_step_time is not None
+            and draft_decode_step_time is not None
+            and target_decode_step_time > 0
+        ):
+            latency_ratio = float(draft_decode_step_time) / float(target_decode_step_time)
+
         for strategy in strategies:
             sampling = build_sampling_config(make_sampling_args(args, strategy))
 
@@ -228,6 +298,9 @@ def main():
 
                     if run_index < args.warmup:
                         continue
+                    baseline_report["target_decode_step_time"] = target_decode_step_time
+                    baseline_report["draft_decode_step_time"] = ""
+                    baseline_report["draft_target_latency_ratio"] = ""
 
                     raw_rows.append(baseline_row(prompt_id, prompt, strategy, baseline_report, args))
                     print(
@@ -251,6 +324,9 @@ def main():
 
                     if run_index < args.warmup:
                         continue
+                    result.stats["target_decode_step_time"] = target_decode_step_time if target_decode_step_time is not None else ""
+                    result.stats["draft_decode_step_time"] = draft_decode_step_time if draft_decode_step_time is not None else ""
+                    result.stats["draft_target_latency_ratio"] = latency_ratio
 
                     raw_rows.append(
                         speculative_row(
@@ -292,6 +368,9 @@ def main():
         "draft_time_ratio",
         "verify_time_ratio",
         "rebuild_time_ratio",
+        "target_decode_step_time",
+        "draft_decode_step_time",
+        "draft_target_latency_ratio",
     ]
 
     groups: Dict[Tuple[object, ...], List[Dict[str, object]]] = {}

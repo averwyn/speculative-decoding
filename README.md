@@ -70,6 +70,28 @@ python run_bench.py --model_pair pythia_14m_1.4b --prompt_preset analysis --warm
 | `pythia-70m -> pythia-1.4b` | `35.28` | `29.94` | `greedy, k=6` |
 | `pythia-160m -> pythia-1.4b` | `34.81` | `26.44` | `greedy, k=4` |
 
+补充说明：
+
+- 上表中的吞吐结论仍然可以用于比较不同 Pythia 配对的整体表现。
+- 但其中旧结果里的 `draft_target_latency_ratio` 采用的是较早的近似口径，不再建议把它当作论文里 `c` 的主分析依据。
+- 当前版本已经把 `draft_target_latency_ratio` 重新实现为严格单步 decode latency 比：`draft_decode_step_time / target_decode_step_time`。
+
+基于新口径做的 Pythia strict smoke test（`greedy + k=4 + max_new_tokens=32 + repeats=1`）结果如下：
+
+| pair | target decode step time (s) | draft decode step time (s) | strict `draft_target_latency_ratio` |
+| --- | ---: | ---: | ---: |
+| `pythia-14m -> pythia-1.4b` | `0.03178` | `0.00852` | `0.268` |
+| `pythia-31m -> pythia-1.4b` | `0.03333` | `0.00862` | `0.259` |
+| `pythia-70m -> pythia-1.4b` | `0.03455` | `0.00888` | `0.257` |
+| `pythia-160m -> pythia-1.4b` | `0.03282` | `0.01647` | `0.502` |
+
+这组 strict smoke test 说明：
+
+- `14m / 31m / 70m` 的单步 draft decode latency 在当前机器上确实非常接近，并不是旧统计口径单独造成的假象。
+- `31m` 与 `70m` 的 strict latency ratio 略低于 `14m`，但差距不大，说明小模型区间的参数差异没有明显转化为单步延迟差异。
+- 真正明显恶化的是 `160m`，其 draft 单步 decode 时间几乎翻倍，导致 `draft_target_latency_ratio` 跳到 `0.502`。
+- 因此，在当前硬件与实现下，Pythia 系列更像是存在一个“小模型延迟平台区”，而不是参数越小、单步 decode 就线性越快。
+
 如果看局部最优而不是总体平均，四组都在 `draft_target_interaction` 这个 prompt 上出现最明显加速：
 
 - `14m -> 1.4b`：最好达到 `44.80 tok/s`，配置为 `greedy, k=8`
@@ -164,7 +186,7 @@ python run_bench.py --model_pair pythia_14m_1.4b --prompt_preset analysis --warm
 - `proposed_tokens_mean/std`：候选 token 数的均值与标准差
 - `accepted_tokens`：被目标模型验证后接受的草稿 token 数
 - `accepted_tokens_mean/std`：接受 token 数的均值与标准差
-- `acceptance_rate`：接受率，定义为 `accepted_tokens / proposed_tokens`
+- `acceptance_rate`：接受率，定义为 *accepted_tokens / proposed_tokens*
 - `acceptance_rate_mean/std`：接受率的均值与标准差
 - `avg_accepted_prefix_length`：平均接受前缀长度，定义为每轮验证中连续被接受的前缀长度平均值
 - `avg_accepted_prefix_length_mean/std`：平均接受前缀长度的均值与标准差
@@ -184,17 +206,22 @@ python run_bench.py --model_pair pythia_14m_1.4b --prompt_preset analysis --warm
 - `draft_time`：草稿模型生成候选所花的总时间
 - `verify_time`：目标模型验证候选所花的总时间
 - `rebuild_time`：发生拒绝后，裁剪 cache、接入纠正 token 并恢复状态推进所花的总时间
-- `draft_time_mean/std`、`verify_time_mean/std`、`rebuild_time_mean/std`：上述阶段耗时的均值与标准差
-- `draft_time_ratio`：提议时间的占比`draft_time / total_generation_time`
-- `verify_time_ratio`：验证时间的占比`verify_time / total_generation_time`
-- `rebuild_time_ratio`：状态更新时间的占比`rebuild_time / total_generation_time`
-- `draft_time_ratio_mean/std`、`verify_time_ratio_mean/std`、`rebuild_time_ratio_mean/std`：三类时间占比的均值与标准差
+- `draft_time_mean/std`、`verify_time_mean/std`、`rebuild_time_mean/std`：分别是上述阶段耗时的均值与标准差
+- `draft_time_ratio`：提议时间的占比，定义为 *draft_time / total_generation_time*
+- `verify_time_ratio`：验证时间的占比，定义为 *verify_time / total_generation_time*
+- `rebuild_time_ratio`：状态更新时间的占比，定义为 *rebuild_time / total_generation_time*
+- `draft_time_ratio_mean/std`、`verify_time_ratio_mean/std`、`rebuild_time_ratio_mean/std`：分别是三类时间占比的均值与标准差
+- `target_decode_step_time`：目标模型在已有 KV cache 上执行一次单 token decode step 的平均耗时
+- `draft_decode_step_time`：草稿模型在已有 KV cache 上执行一次单 token decode step 的平均耗时
+- `draft_target_latency_ratio`：原始论文里的延迟比 `c`，定义为 *draft_decode_step_time / target_decode_step_time*；当前版本按严格单步 decode latency 口径统计
+- `target_decode_step_time_mean/std`、`draft_decode_step_time_mean/std`、`draft_target_latency_ratio_mean/std`：上述单步耗时与延迟比的均值与标准差
 
 这些字段主要用于定位瓶颈：
 
 - `draft_time_ratio` 高，说明瓶颈更偏向草稿模型提案阶段
 - `verify_time_ratio` 高，说明瓶颈更偏向目标模型验证阶段
 - `rebuild_time_ratio` 高，说明拒绝后的状态恢复成本仍然明显
+- `draft_target_latency_ratio` 越小，越接近论文中“draft 明显快于 target”的理想条件；如果它偏大，即使参数量差很多，也未必能带来加速
 
 ### 6. 历史字段说明
 
@@ -268,6 +295,7 @@ python run_bench.py --model_pair pythia_14m_1.4b --prompt_preset analysis --warm
 D:\MiniConda\envs\torch\python.exe run_bench.py --model_pair distilgpt2_gpt2 --prompt_preset analysis --warmup 1 --repeats 3 --cache_dir D:\hf_cache --local_files_only --out_dir results/distilgpt2_gpt2
 D:\MiniConda\envs\torch\python.exe run_bench.py --model_pair pythia_31m_1.4b --prompt_preset analysis --warmup 1 --repeats 3 --cache_dir D:\hf_cache --local_files_only --out_dir results/pythia_31m_1.4b
 D:\MiniConda\envs\torch\python.exe run_bench.py --model_pair pythia_31m_1.4b --draft_quantization 8bit --prompt_preset analysis --warmup 1 --repeats 3 --cache_dir D:\hf_cache --local_files_only --out_dir results/pythia_31m_1.4b_8bit
+D:\MiniConda\envs\torch\python.exe run_bench.py --model_pair pythia_14m_1.4b --prompt "Explain speculative decoding in simple terms." --strategies greedy --ks 4 --warmup 1 --repeats 1 --max_new_tokens 32 --cache_dir D:\hf_cache --local_files_only --out_dir results/smoke_strict_pythia_14m_1.4b
 ```
 
 如果只想快速检查 baseline 差异，也可以单独运行：
