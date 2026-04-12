@@ -130,6 +130,7 @@ def init_stats() -> Dict[str, float]:
         "rejection_events": 0,
         "verify_rounds": 0,
         "accepted_prefix_sum": 0.0,
+        "top1_match_count": 0,
         "draft_time": 0.0,
         "verify_time": 0.0,
         "rebuild_time": 0.0,
@@ -246,8 +247,12 @@ def verify_block(
         else:
             current_logits = verify_logits[idx - 1 : idx, :]
 
+        target_top1_token = int(current_logits.argmax(dim=-1).item())
+        if target_top1_token == draft_token:
+            stats["top1_match_count"] = stats.get("top1_match_count", 0) + 1
+
         if sampling.is_greedy:
-            accept = int(current_logits.argmax(dim=-1).item()) == draft_token
+            accept = target_top1_token == draft_token
         elif sampling.strategy == "top_k":
             target_dist = build_topk_distribution(current_logits, sampling.top_k, sampling.temperature)
             draft_step_dist = proposal_probs[idx]
@@ -314,12 +319,14 @@ def finalize_stats(stats: Dict[str, float], elapsed: float, generated_tokens: in
     accepted = stats["accepted_tokens"]
     verify_rounds = stats["verify_rounds"]
     stats["acceptance_rate"] = accepted / proposed if proposed > 0 else 0.0
+    stats["top1_match_rate"] = stats["top1_match_count"] / proposed if proposed > 0 else 0.0
     stats["avg_accepted_prefix_length"] = (
         stats["accepted_prefix_sum"] / verify_rounds if verify_rounds > 0 else 0.0
     )
     stats["total_generation_time"] = elapsed
     stats["generated_tokens"] = generated_tokens
     stats["tokens_per_s"] = generated_tokens / elapsed if elapsed > 0 else 0.0
+    stats["accepted_tokens_per_draft_second"] = accepted / stats["draft_time"] if stats["draft_time"] > 0 else 0.0
     return stats
 
 
@@ -411,6 +418,7 @@ def speculative_generate(
 
         accept_len = len(accepted_ids)
         stats["verify_time"] += verify_stats["verify_time"]
+        stats["top1_match_count"] += verify_stats.get("top1_match_count", 0)
         stats["accepted_tokens"] += accept_len
         stats["rejection_events"] += 0 if all_accepted else 1
         stats["accepted_prefix_sum"] += accept_len

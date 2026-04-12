@@ -36,7 +36,6 @@ PROMPT_PRESETS: Dict[str, List[Tuple[str, str]]] = {
     ],
 }
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark single-level speculative decoding across strategies and k.")
     parser.add_argument("--prompt", default="Explain speculative decoding in simple terms:")
@@ -87,6 +86,8 @@ def load_prompts(args) -> List[Tuple[str, str]]:
     return [("prompt_1", args.prompt)]
 def summarize_rows(rows: List[Dict[str, object]], numeric_keys: Sequence[str]) -> Dict[str, object]:
     summary = {"n": len(rows)}
+    means: Dict[str, object] = {}
+    stds: Dict[str, object] = {}
     for key in numeric_keys:
         values = []
         for row in rows:
@@ -96,14 +97,16 @@ def summarize_rows(rows: List[Dict[str, object]], numeric_keys: Sequence[str]) -
             values.append(float(value))
 
         if not values:
-            summary[f"{key}_mean"] = ""
-            summary[f"{key}_std"] = ""
+            means[f"{key}_mean"] = ""
+            stds[f"{key}_std"] = ""
         elif len(values) == 1:
-            summary[f"{key}_mean"] = values[0]
-            summary[f"{key}_std"] = 0.0
+            means[f"{key}_mean"] = values[0]
+            stds[f"{key}_std"] = 0.0
         else:
-            summary[f"{key}_mean"] = stats.mean(values)
-            summary[f"{key}_std"] = stats.pstdev(values)
+            means[f"{key}_mean"] = stats.mean(values)
+            stds[f"{key}_std"] = stats.pstdev(values)
+    summary.update(means)
+    summary.update(stds)
     return summary
 
 
@@ -172,11 +175,13 @@ def baseline_row(prompt_id: str, prompt: str, strategy: str, report: Dict[str, o
         "temperature": 1.0 if strategy == "greedy" else args.temperature,
         "generated_tokens": report["generated_tokens"],
         "acceptance_rate": "",
+        "top1_match_rate": "",
         "avg_accepted_prefix_length": "",
         "total_generation_time": total_time,
         "tokens_per_s": report["tokens_per_s"],
         "proposed_tokens": "",
         "accepted_tokens": "",
+        "accepted_tokens_per_draft_second": "",
         "rejection_events": "",
         "verify_rounds": "",
         "draft_time": 0.0,
@@ -215,13 +220,15 @@ def speculative_row(
         "top_k": args.top_k if strategy == "top_k" else "",
         "top_p": args.top_p if strategy == "top_p" else "",
         "temperature": 1.0 if strategy == "greedy" else args.temperature,
-        "generated_tokens": report["generated_tokens"],
         "acceptance_rate": report["acceptance_rate"],
+        "top1_match_rate": report.get("top1_match_rate", ""),
         "avg_accepted_prefix_length": report["avg_accepted_prefix_length"],
+        "generated_tokens": report["generated_tokens"],
         "total_generation_time": total_time,
         "tokens_per_s": report["tokens_per_s"],
         "proposed_tokens": report["proposed_tokens"],
         "accepted_tokens": report["accepted_tokens"],
+        "accepted_tokens_per_draft_second": report.get("accepted_tokens_per_draft_second", ""),
         "rejection_events": report["rejection_events"],
         "verify_rounds": report["verify_rounds"],
         "draft_time": draft_time,
@@ -355,11 +362,13 @@ def main():
         "prompt_chars",
         "generated_tokens",
         "acceptance_rate",
+        "top1_match_rate",
         "avg_accepted_prefix_length",
         "total_generation_time",
         "tokens_per_s",
         "proposed_tokens",
         "accepted_tokens",
+        "accepted_tokens_per_draft_second",
         "rejection_events",
         "verify_rounds",
         "draft_time",

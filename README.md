@@ -110,9 +110,10 @@ python run_bench.py --model_pair pythia_14m_1.4b --prompt_preset analysis --warm
 额外尝试：
 
 - 已为代码加入 draft-only 量化入口：`--draft_quantization {none,8bit,4bit}`
-- 在当前环境（Windows + RTX 3060 Laptop GPU 6GB + `bitsandbytes`）下，`pythia-31m -> pythia-1.4b` 的 `8bit` smoke test 没有观察到正收益，draft 侧耗时反而上升
-- `4bit` smoke test 相比 `8bit` 略有改善，draft 侧耗时也更低，但整体仍未显示出足够明显的加速收益
-- 因此，当前阶段不建议把 `bitsandbytes` 量化作为这一配对的主要提速方向
+- 在当前环境（Windows + RTX 3060 Laptop GPU 6GB + `bitsandbytes`）下，`pythia-31m -> pythia-1.4b` 的 `8bit` smoke test 没有观察到正收益，draft 侧耗时反而上升；`4bit` 相比 `8bit` 略有改善，但整体仍未显示出足够明显的加速收益
+- 对 `pythia-160m -> pythia-1.4b` 的进一步 smoke test 也得到类似结论：未量化时 speculative 吞吐约 `20.29 tok/s`，而 `8bit` / `4bit` 分别降到 `7.75 tok/s` / `12.64 tok/s`
+- 对应地，`pythia-160m` 的 draft 单步 decode latency 也没有被量化压低，反而从未量化时的 `0.01698s` 升到 `8bit` 的 `0.05526s` 与 `4bit` 的 `0.03157s`
+- 这说明当前量化效果不佳的一个核心原因，是 draft 侧单步解码延迟没有下降，甚至出现额外开销；因此，当前阶段不建议把 `bitsandbytes` 量化作为这组 Pythia 配对的主要提速方向
 
 这些预设同时可用于：
 
@@ -188,8 +189,12 @@ python run_bench.py --model_pair pythia_14m_1.4b --prompt_preset analysis --warm
 - `accepted_tokens_mean/std`：接受 token 数的均值与标准差
 - `acceptance_rate`：接受率，定义为 *accepted_tokens / proposed_tokens*
 - `acceptance_rate_mean/std`：接受率的均值与标准差
+- `top1_match_rate`：top-1 一致率，定义为草稿模型提出的 token 中，有多少比例恰好等于目标模型在对应位置的 top-1 token
+- `top1_match_rate_mean/std`：top-1 一致率的均值与标准差；在 `greedy` 路径下它与 `acceptance_rate` 基本一致，在采样路径下则更能单独反映“draft 是否像 target”
 - `avg_accepted_prefix_length`：平均接受前缀长度，定义为每轮验证中连续被接受的前缀长度平均值
 - `avg_accepted_prefix_length_mean/std`：平均接受前缀长度的均值与标准差
+- `accepted_tokens_per_draft_second`：单位草稿提议成本的有效收益，定义为 *accepted_tokens / draft_time*，表示每 1 秒 draft 生成时间平均能换来多少个最终被接受的 token
+- `accepted_tokens_per_draft_second_mean/std`：上述单位草稿成本收益的均值与标准差；它特别适合比较像 `pythia-31m` 与 `pythia-70m` 这种 draft 延迟接近、但最终收益不同的配对
 - `rejection_events`：实际发生拒绝的轮次数
 - `rejection_events_mean/std`：拒绝事件数的均值与标准差
 - `verify_rounds`：进行 speculative 验证的轮次数
@@ -283,7 +288,7 @@ python run_bench.py --model_pair pythia_14m_1.4b --prompt_preset analysis --warm
 - 当前最主要的性能瓶颈已经不是目标模型验证阶段，而是草稿模型候选生成阶段，即 `draft_time`
 - 拒绝后的 cache 恢复开销虽然仍存在，但相较初始实现已经显著下降；在当前实现中，`rebuild_time` 主要反映前缀裁剪后的必要状态推进，而不再包含整段 cache 重建
 - 对 `pythia-1.4b` 而言，草稿模型存在明显的“过大反而变慢”现象，目前 `pythia-31m` 是已测试配对中最平衡的候选
-- 已尝试为 draft 模型接入 `bitsandbytes` 量化；其中 `4bit` 比 `8bit` 更有希望，但在当前硬件与环境组合下，两者都尚未带来决定性正收益
+- 已尝试为 draft 模型接入 `bitsandbytes` 量化；但无论是 `pythia-31m` 还是 `pythia-160m`，当前 smoke test 都没有显示决定性正收益，核心原因之一是量化后的 draft 单步 decode latency 未能明显下降
 
 这说明：一级推测解码能否带来明显加速，不仅取决于算法流程本身，也强烈依赖模型配对关系与工程实现质量。若目标模型本身不够慢，或者草稿模型提案成本仍然较高，则推测解码的理论收益会被额外开销抵消。
 
